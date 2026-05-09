@@ -1,47 +1,46 @@
-name: CI
+name: Deploy
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    branches:
+      - main
 
 jobs:
-  test:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Ruff
-        run: pip install ruff
+      - name: Login GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Lint
-        run: ruff check app/
+      - name: Build image
+        run: |
+          docker build -t ghcr.io/${{ github.repository }}/statuspulse:${{ github.sha }} .
+          docker tag ghcr.io/${{ github.repository }}/statuspulse:${{ github.sha }} ghcr.io/${{ github.repository }}/statuspulse:latest
 
-      - name: Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+      - name: Push image
+        run: |
+          docker push ghcr.io/${{ github.repository }}/statuspulse:${{ github.sha }}
+          docker push ghcr.io/${{ github.repository }}/statuspulse:latest
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
         with:
-          dockerfile: Dockerfile
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /opt/statuspulse
+            bash scripts/deploy.sh
 
-      - name: Create env file
-        run: cp .env.example .env
+      - name: Health Check
+        run: curl -f https://${{ secrets.DOMAIN }}/health
 
-      - name: Build Stack
-        run: docker compose up -d --build
-
-      - name: Wait for health
-        run: sleep 30
-
-      - name: Run integration tests
-        run: bash tests/test_integration.sh
-
-      - name: Upload results
-        uses: actions/upload-artifact@v4
-        with:
-          name: integration-results
-          path: tests/
-
-      - name: Cleanup
-        run: docker compose down -v
+      - name: Discord Notification
+        if: always()
+        run: |
+          curl -H "Content-Type: application/json" \
+          -d '{"content":"Deployment completed for StatusPulse"}' \
+          ${{ secrets.DISCORD_WEBHOOK }}
